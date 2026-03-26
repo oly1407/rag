@@ -9,5 +9,6 @@ public class Test {
     public static void main(String[] args) {
         System.out.println("xixi");
         System.out.println("lll");
+        System.out.println("6666");
     }
 }
