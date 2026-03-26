@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能Java客服（Qwen）</title>
+    <style>
+        body { font-family: Arial, "Microsoft YaHei", sans-serif; background:#f6f7fb; margin:0; }
+        .container { max-width: 1180px; margin: 20px auto; padding: 0 16px; }
+        .layout { display:flex; gap:12px; }
+        .sidebar { width: 320px; background:#fff; border:1px solid #e6e8ef; border-radius:12px; overflow:hidden; height: calc(64vh + 132px); display:flex; flex-direction:column; }
+        .sidebarHeader { padding:12px; border-bottom:1px solid #e6e8ef; display:flex; flex-direction:column; gap:10px; }
+        .sidebarHeader .row { display:flex; gap:8px; align-items:center; }
+        .sidebarList { padding:8px; overflow:auto; flex:1; background:#fafbff; }
+        .sessionItem { padding:10px 10px; border:1px solid #e6e8ef; background:#fff; border-radius:10px; margin:8px 0; cursor:pointer; }
+        .sessionItem.active { border-color:#3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.12); }
+        .sessionTitle { font-size:13px; font-weight:700; color:#111827; }
+        .sessionMeta { font-size:12px; color:#6b7280; margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; }
+        .main { flex:1; }
+        .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+        .topbar .left { display:flex; flex-direction:column; gap:4px; }
+        .title { font-size:18px; font-weight:700; }
+        .sub { color:#666; font-size:12px; }
+        .actions { display:flex; gap:8px; }
+        button { cursor:pointer; border:1px solid #d0d0d0; background:#fff; padding:8px 12px; border-radius:8px; }
+        button.primary { background:#3b82f6; color:#fff; border-color:#3b82f6; }
+        button.danger { background:#ef4444; color:#fff; border-color:#ef4444; }
+        .panel { background:#fff; border:1px solid #e6e8ef; border-radius:12px; overflow:hidden; }
+        .chatlog { height: 64vh; padding: 12px; overflow:auto; background:#fafbff; }
+        .msg { margin: 10px 0; display:flex; }
+        .msg .bubble { padding:10px 12px; border-radius:12px; max-width: 78%; white-space:pre-wrap; word-break:break-word; line-height:1.45; }
+        .msg.user { justify-content:flex-end; }
+        .msg.user .bubble { background:#dbeafe; border:1px solid #93c5fd; }
+        .msg.assistant { justify-content:flex-start; }
+        .msg.assistant .bubble { background:#fff; border:1px solid #e5e7eb; }
+        .meta { font-size:11px; color:#777; margin-top:6px; }
+        .composer { display:flex; gap:10px; padding: 12px; border-top:1px solid #e6e8ef; }
+        textarea { flex:1; min-height: 46px; resize:none; border-radius:10px; border:1px solid #e6e8ef; padding:10px; }
+        .hint { font-size:12px; color:#666; margin: 6px 0 0; }
+        .pill { font-size:12px; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; border:1px solid #e0e7ff; }
+        .loading { opacity:0.7; }
+        .error { color:#b91c1c; margin: 8px 0 0; font-size: 13px; }
+        input[type="text"] { border:1px solid #e6e8ef; border-radius:10px; padding:8px 10px; flex:1; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="layout">
+        <div class="sidebar">
+            <div class="sidebarHeader">
+                <div class="row">
+                    <div class="title" style="font-size:16px;">对话历史</div>
+                    <button id="btnRefreshSessions" title="刷新列表">刷新</button>
+                </div>
+                <div class="row">
+                    <input id="userNoInput" type="text" placeholder="userNo（默认 anonymous）">
+                </div>
+                <div class="sub">点击某个会话可查看历史并切换当前对话。</div>
+            </div>
+            <div class="sidebarList" id="sessionList"></div>
+        </div>
+
+        <div class="main">
+            <div class="topbar">
+                <div class="left">
+                    <div class="title">智能Java客服（Qwen）</div>
+                    <div class="sub">
+                        会话ID：<span class="pill" id="sessionPill">未创建</span>
+                    </div>
+                </div>
+                <div class="actions">
+                    <button id="btnExport" title="导出当前会话为Excel">导出Excel</button>
+                    <button id="btnNewChatTop" class="primary" title="新增对话">新增对话</button>
+                    <button id="btnDelete" class="danger" title="删除当前会话">删除会话</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="chatlog" id="chatlog"></div>
+                <div class="composer">
+                    <div style="flex:1; display:flex; flex-direction:column;">
+                        <textarea id="msgInput" placeholder="输入你的问题，比如：Spring Boot 如何做全局异常处理？"></textarea>
+                        <div class="hint">支持长对话；模型上下文默认只保留最近约30轮（用于控成本/控token）；敏感词会被自动屏蔽。</div>
+                        <div class="error" id="errBox"></div>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:10px; justify-content:flex-end;">
+                        <button id="btnSend" class="primary">发送</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = "/api/chat";
+
+    const sessionKey = "sessionId";
+    const userKey = "userNo";
+
+    let sessionId = localStorage.getItem(sessionKey) || "";
+    let userNo = localStorage.getItem(userKey) || "anonymous";
+
+    const chatlog = document.getElementById("chatlog");
+    const sessionPill = document.getElementById("sessionPill");
+    const msgInput = document.getElementById("msgInput");
+    const errBox = document.getElementById("errBox");
+    const sessionList = document.getElementById("sessionList");
+    const userNoInput = document.getElementById("userNoInput");
+
+    function escapeHtml(s) {
+        return (s ?? "").toString()
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    }
+
+    function addMsg(role, content, metaText) {
+        const div = document.createElement("div");
+        div.className = "msg " + (role === "user" ? "user" : "assistant");
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.innerHTML = escapeHtml(content);
+        div.appendChild(bubble);
+        if (metaText) {
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.innerText = metaText;
+            div.appendChild(meta);
+        }
+        chatlog.appendChild(div);
+        chatlog.scrollTop = chatlog.scrollHeight;
+    }
+
+    function setError(text) {
+        errBox.innerText = text || "";
+    }
+
+    function renderHistory(historyResp) {
+        chatlog.innerHTML = "";
+        sessionPill.innerText = historyResp.sessionId || "未创建";
+        (historyResp.messages || []).forEach(m => {
+            const meta = m.createdAt ? ("时间：" + m.createdAt) : "";
+            addMsg(m.role, m.content, meta);
+        });
+    }
+
+    async function loadHistory() {
+        if (!sessionId) return;
+        try {
+            setError("");
+            const resp = await fetch(API_BASE + "/history?sessionId=" + encodeURIComponent(sessionId));
+            if (!resp.ok) throw new Error("加载历史失败：" + resp.status);
+            const data = await resp.json();
+            renderHistory(data);
+        } catch (e) {
+            console.warn(e);
+        }
+    }
+
+    function fmtTime(s) {
+        if (!s) return "";
+        return s.replace("T", " ");
+    }
+
+    function shortTitle(s, n) {
+        const t = (s || "").trim();
+        if (!t) return "";
+        // 按“字”大致截断：JS按 code unit，中文场景够用；后端已保证最多8字+省略号，这里仅兜底
+        if (t.length <= n) return t;
+        return t.slice(0, n) + "…";
+    }
+
+    function setActiveSession(sid) {
+        sessionId = sid || "";
+        if (sessionId) localStorage.setItem(sessionKey, sessionId);
+        else localStorage.removeItem(sessionKey);
+        sessionPill.innerText = sessionId ? sessionId : "未创建";
+    }
+
+    async function loadSessions() {
+        try {
+            const resp = await fetch(API_BASE + "/sessions?userNo=" + encodeURIComponent(userNo) + "&limit=100");
+            if (!resp.ok) throw new Error("加载会话列表失败：" + resp.status);
+            const data = await resp.json();
+            renderSessions(data.sessions || []);
+        } catch (e) {
+            console.warn(e);
+        }
+    }
+
+    function renderSessions(sessions) {
+        sessionList.innerHTML = "";
+        if (!sessions.length) {
+            const empty = document.createElement("div");
+            empty.className = "sub";
+            empty.style.padding = "10px";
+            empty.innerText = "暂无历史会话。点击“新建”开始。";
+            sessionList.appendChild(empty);
+            return;
+        }
+        sessions.forEach(s => {
+            const item = document.createElement("div");
+            item.className = "sessionItem" + (s.sessionId === sessionId ? " active" : "");
+
+            const title = document.createElement("div");
+            title.className = "sessionTitle";
+            title.innerText = (s.title && s.title.trim())
+                ? shortTitle(s.title, 8)
+                : ("会话 " + (s.sessionId || "").slice(0, 8));
+            item.appendChild(title);
+
+            const meta = document.createElement("div");
+            meta.className = "sessionMeta";
+            const statusText = (s.status === 2) ? "已结束" : "进行中";
+            meta.innerText = `状态：${statusText}  轮次：${s.roundCount ?? 0}  时间：${fmtTime(s.lastMessageAt)}`;
+            item.appendChild(meta);
+
+            item.addEventListener("click", async () => {
+                setActiveSession(s.sessionId);
+                await loadHistory();
+                await loadSessions();
+            });
+
+            sessionList.appendChild(item);
+        });
+    }
+
+    async function newChat() {
+        setError("");
+        try {
+            const resp = await fetch(API_BASE + "/create?userNo=" + encodeURIComponent(userNo), { method: "POST" });
+            if (!resp.ok) throw new Error("新建会话失败：" + resp.status);
+            const data = await resp.json();
+            setActiveSession(data.sessionId);
+            chatlog.innerHTML = "";
+            await loadSessions();
+        } catch (e) {
+            setError(e.message || "新建会话失败");
+        }
+    }
+
+    async function sendMsg() {
+        const message = (msgInput.value || "").trim();
+        if (!message) {
+            setError("请输入内容");
+            return;
+        }
+
+        setError("");
+
+        // optimistic render
+        addMsg("user", message);
+        msgInput.value = "";
+        document.getElementById("btnSend").disabled = true;
+        document.getElementById("btnSend").classList.add("loading");
+
+        try {
+            await sendMsgStream(message);
+        } catch (e) {
+            setError(e.message || "发送失败");
+        } finally {
+            document.getElementById("btnSend").disabled = false;
+            document.getElementById("btnSend").classList.remove("loading");
+        }
+    }
+
+    async function sendMsgStream(message) {
+        const payload = {
+            sessionId: sessionId || null,
+            userNo: userNo,
+            message: message
+        };
+
+        const resp = await fetch(API_BASE + "/stream", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+        });
+
+        if (!resp.ok) {
+            let data = null;
+            try { data = await resp.json(); } catch (_) {}
+            throw new Error(data?.error || ("请求失败：" + resp.status));
+        }
+
+        // create an assistant bubble and stream into it
+        const div = document.createElement("div");
+        div.className = "msg assistant";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        bubble.innerHTML = "";
+        div.appendChild(bubble);
+        chatlog.appendChild(div);
+        chatlog.scrollTop = chatlog.scrollHeight;
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let buf = "";
+        let full = "";
+
+        while (true) {
+            const {value, done} = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, {stream: true});
+
+            // SSE frames separated by \n\n, each line may be "data: xxx"
+            let idx;
+            while ((idx = buf.indexOf("\n\n")) !== -1) {
+                const frame = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+
+                const lines = frame.split("\n");
+                for (const line of lines) {
+                    if (!line.startsWith("data:")) continue;
+                    const data = line.slice(5).trimStart();
+                    if (!data) continue;
+
+                    if (data.startsWith("__META__:")) {
+                        const sid = data.slice("__META__:".length).trim();
+                        if (sid) {
+                            setActiveSession(sid);
+                        }
+                        continue;
+                    }
+
+                    full += data;
+                    bubble.innerHTML = escapeHtml(full);
+                    chatlog.scrollTop = chatlog.scrollHeight;
+                }
+            }
+        }
+        // refresh session list after finish (best-effort)
+        loadSessions();
+    }
+
+    async function deleteSession() {
+        if (!sessionId) {
+            setError("没有可删除的会话");
+            return;
+        }
+        if (!confirm("确定删除当前会话吗？删除后可以重新开始。")) return;
+        setError("");
+        try {
+            const resp = await fetch(API_BASE + "/delete", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({sessionId: sessionId})
+            });
+            if (!resp.ok) throw new Error("删除失败：" + resp.status);
+            localStorage.removeItem(sessionKey);
+            sessionId = "";
+            sessionPill.innerText = "未创建";
+            chatlog.innerHTML = "";
+            setError("");
+        } catch (e) {
+            setError(e.message || "删除失败");
+        }
+    }
+
+    async function exportExcel() {
+        if (!sessionId) {
+            setError("没有可导出的会话");
+            return;
+        }
+        setError("");
+        try {
+            const resp = await fetch(API_BASE + "/export?sessionId=" + encodeURIComponent(sessionId));
+            if (!resp.ok) throw new Error("导出失败：" + resp.status);
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            const cd = resp.headers.get("content-disposition");
+            let fileName = "chat.xlsx";
+            if (cd && cd.includes("filename*=")) {
+                fileName = cd.split("filename*=")[1].split(";")[0].replaceAll("''", "");
+                try { fileName = decodeURIComponent(fileName); } catch (_) {}
+            }
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError(e.message || "导出失败");
+        }
+    }
+
+    document.getElementById("btnSend").addEventListener("click", sendMsg);
+    document.getElementById("btnDelete").addEventListener("click", deleteSession);
+    document.getElementById("btnExport").addEventListener("click", exportExcel);
+    document.getElementById("btnRefreshSessions").addEventListener("click", loadSessions);
+    document.getElementById("btnNewChatTop").addEventListener("click", newChat);
+
+    userNoInput.value = userNo;
+    userNoInput.addEventListener("change", async () => {
+        const v = (userNoInput.value || "").trim() || "anonymous";
+        userNo = v;
+        localStorage.setItem(userKey, userNo);
+        await loadSessions();
+    });
+
+    // enter to send (Ctrl+Enter for newline)
+    msgInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.ctrlKey && !e.shiftKey) {
+            e.preventDefault();
+            sendMsg();
+        }
+    });
+
+    sessionPill.innerText = sessionId ? sessionId : "未创建";
+    loadHistory();
+    loadSessions();
+</script>
+</body>
+</html>
+
